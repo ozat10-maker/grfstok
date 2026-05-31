@@ -1,6 +1,34 @@
+import streamlit as st
 import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import pandas as pd
+from datetime import datetime, timedelta
 
+# =========================================================
+# ⚙️ חלק 1: הגדרות דף ותשתית האפליקציה
+# =========================================================
+st.set_page_config(page_title="מנוע ניתוח משולב", layout="wide")
+st.title("🎯 מנוע סריקה משולב ומחשבון ניהול סיכונים")
+st.write("מערכת חכמה המשלבת ניתוח טכני מהכתבה יחד עם מחשבון ניהול סיכונים אופרטיבי לקבלת החלטות.")
+
+# --- סרגל צדי (Sidebar) ---
+st.sidebar.header("💰 הגדרות תקציב וסיכונים")
+investment_amount = st.sidebar.number_input("סכום להשקעה פנויה ($):", min_value=100, value=10000, step=500)
+risk_percent = st.sidebar.slider("אחוז סיכון מקסימלי מהתיק (%):", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 בחירת מניות לסריקה")
+ticker_1 = st.sidebar.text_input("מניה ראשונה:", value="AAPL").upper()
+ticker_2 = st.sidebar.text_input("מניה שנייה:", value="NVDA").upper()
+
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365 * 2)
+
+# =========================================================
+# 🧠 חלק 2: פונקציות הניתוח והלוגיקה האלגוריתמית
+# =========================================================
+@st.cache_data(ttl=3600)
 def load_stock_data(ticker_symbol, start, end):
     """משיכת נתונים מ-Yahoo Finance עם הגנה מפני שגיאות"""
     try:
@@ -15,11 +43,11 @@ def load_stock_data(ticker_symbol, start, end):
 
 def analyze_ticker(df, info, investment_amount, risk_percent):
     """מנוע הניתוח הטכני, הניקוד וניהול הסיכונים"""
-    # 1. חישוב ממוצעים נעים
+    # 1. חישוב ממוצעים נעים (SMA50, SMA200)
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['MA200'] = df['Close'].rolling(window=200).mean()
 
-    # 2. חישוב מדד RSI
+    # 2. חישוב מדד RSI (14 ימים)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -45,7 +73,7 @@ def analyze_ticker(df, info, investment_amount, risk_percent):
     current_rsi = df['RSI'].iloc[-1]
     ma200_curr = df['MA200'].iloc[-1]
 
-    # 4. מנוע ניקוד (Score) והחלטה
+    # 4. מנוע ניקוד (Score) והחלטה טכנית בשורה התחתונה
     score = 0
     if current_price > ma200_curr:
         score += 1
@@ -64,13 +92,13 @@ def analyze_ticker(df, info, investment_amount, risk_percent):
     else:
         verdict = "🟡 ניטרלי / החזק (Hold)"
 
-    # 5. מציאת רמת התמיכה הקרובה ביותר מתחת למחיר
+    # 5. מציאת רמת התמיכה הקרובה ביותר מתחת למחיר הנוכחי (לפקודת הלימיט)
     waiting_target = fib_levels['61.8%']
     for level_name, level_val in sorted(fib_levels.items(), key=lambda x: x):
         if level_val < current_price:
             waiting_target = level_val
 
-    # 6. חישובי מחשבון סיכונים ותקציב
+    # 6. מחשבון ניהול סיכונים ותקציב (חוק ה-1%-2% קביעת גודל פוזיציה)
     stop_loss_price = waiting_target * 0.97
     allowed_loss_usd = investment_amount * (risk_percent / 100)
     risk_per_share = current_price - stop_loss_price
@@ -83,7 +111,7 @@ def analyze_ticker(df, info, investment_amount, risk_percent):
     if (total_shares_to_buy * current_price) > investment_amount:
         total_shares_to_buy = int(investment_amount / current_price)
 
-    # אסטרטגיית פיצול (60/40)
+    # חלוקה אסטרטגית לפיצול קניות (60% מיידי, 40% לימיט בתמיכה)
     shares_p1 = int(total_shares_to_buy * 0.60)
     shares_p2 = total_shares_to_buy - shares_p1
 
@@ -95,48 +123,22 @@ def analyze_ticker(df, info, investment_amount, risk_percent):
         "shares_p2": shares_p2, "cost_p1": shares_p1 * current_price,
         "cost_p2": shares_p2 * waiting_target
     }
-import streamlit as st
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import pandas as pd
-from datetime import datetime, timedelta
-# ייבוא הפונקציות מקובץ הלוגיקה המקביל
-from indicators import load_stock_data, analyze_ticker
 
-# הגדרות דף ב-Streamlit
-st.set_page_config(page_title="מנוע ניתוח משולב", layout="wide")
-st.title("🎯 מנוע סריקה משולב ומחשבון ניהול סיכונים")
-
-# --- סרגל צדי (Sidebar) ---
-st.sidebar.header("💰 הגדרות תקציב וסיכונים")
-investment_amount = st.sidebar.number_input("סכום להשקעה פנויה ($):", min_value=100, value=10000, step=500)
-risk_percent = st.sidebar.slider("אחוז סיכון מקסימלי מהתיק (%):", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-
-st.sidebar.markdown("---")
-st.sidebar.header("🔍 בחירת מניות לסריקה")
-ticker_1 = st.sidebar.text_input("מניה ראשונה:", value="AAPL").upper()
-ticker_2 = st.sidebar.text_input("מניה שנייה:", value="NVDA").upper()
-
-end_date = datetime.today()
-start_date = end_date - timedelta(days=365 * 2)
-
-# טעינת נתונים (שימוש ב-Streamlit Cache לעטיפת הפונקציה המיובאת)
-@st.cache_data(ttl=3600)
-def get_cached_data(ticker, start, end):
-    return load_stock_data(ticker, start, end)
-
+# =========================================================
+# 📺 חלק 3: ממשק המשתמש והצגת הנתונים (Streamlit UI)
+# =========================================================
 with st.spinner('מריץ סריקה וניתוח נתונים במקביל...'):
-    df1, info1 = get_cached_data(ticker_1, start_date, end_date)
-    df2, info2 = get_cached_data(ticker_2, start_date, end_date)
+    df1, info1 = load_stock_data(ticker_1, start_date, end_date)
+    df2, info2 = load_stock_data(ticker_2, start_date, end_date)
 
 if not df1 or not df2:
     st.error("שגיאה: אחד או שניים מסימולי המניות אינם תקינים או שחסרים נתונים היסטוריים.")
 else:
-    # הרצת הניתוח דרך קובץ האינדיקטורים המופרד
+    # הרצת הניתוח באמצעות הפונקציות המובנות
     res1 = analyze_ticker(df1, info1, investment_amount, risk_percent)
     res2 = analyze_ticker(df2, info2, investment_amount, risk_percent)
 
-    # --- 1. טבלת השוואה מהירה ---
+    # --- א. טבלת השוואה וסריקה מהירה ---
     st.subheader("📋 לוח סריקה והשוואה מהירה")
     summary_table = {
         "פרמטר": ["שם החברה", "מחיר נוכחי", "מדד מומנטום RSI", "המלצה טכנית", "יעד כניסה/תמיכה"],
@@ -145,7 +147,7 @@ else:
     }
     st.table(pd.DataFrame(summary_table).set_index("פרמטר"))
 
-    # --- 2. מחשבון ניהול סיכונים (טאבים) ---
+    # --- ב. תצוגת מחשבון ניהול הסיכונים (טאבים) ---
     st.markdown("---")
     st.subheader("🧮 מחשבון ניהול סיכונים והנחיות חלוקת תקציב")
     
@@ -158,7 +160,7 @@ else:
         st.markdown(f"""
         🧱 **מתווה פיצול הקניות האופטימלי עבור {ticker_name}:**
         * **שלב א' (כניסה מיידית - 60%):** קנה **{res['shares_p1']}** מניות במחיר נוכחי (**${res['current_price']:.2f}**). שווי: `${res['cost_p1']:,.2f}`.
-        * **שלב ב' (המתנה לירידה - 40%):** הגדר פקודת Limit של **{res['shares_p2']}** מניות בתמיכה (**${res['waiting_target']:.2f}**). שווי: `${res['cost_p2']:,.2f}`.
+        * **שלב B' (המתנה לירידה - 40%):** הגדר פקודת Limit של **{res['shares_p2']}** מניות בתמיכה (**${res['waiting_target']:.2f}**). שווי: `${res['cost_p2']:,.2f}`.
         * **⚠️ רמת בטיחות:** יציאה בתוך הפסד ב-**${res['stop_loss_price']:.2f}**. סיכון תיק מוגן על: `${res['allowed_loss_usd']:.2f}`.
         """)
 
@@ -166,7 +168,7 @@ else:
     with t1: show_ui_metrics(res1, ticker_1)
     with t2: show_ui_metrics(res2, ticker_2)
 
-    # --- 3. גרפים טכניים בתחתית ---
+    # --- ג. גרפים טכניים בתחתית הדף ---
     st.markdown("---")
     st.subheader("📉 גרפים טכניים להרחבה ומעקב")
     
