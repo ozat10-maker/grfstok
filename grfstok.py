@@ -1,182 +1,185 @@
-import streamlit as st
 import yfinance as yf
+import pandas as pd
+
+def load_stock_data(ticker_symbol, start, end):
+    """משיכת נתונים מ-Yahoo Finance הגנה מפני שגיאות"""
+    try:
+        stock_obj = yf.Ticker(ticker_symbol)
+        hist_df = stock_obj.history(start=start, end=end)
+        info_dict = stock_obj.info
+        if hist_df.empty or len(hist_df) < 200:
+            return None, None
+        return hist_df, info_dict
+    except:
+        return None, None
+
+def analyze_ticker(df, info, investment_amount, risk_percent):
+    """מנוע הניתוח הטכני, הניקוד וניהול הסיכונים"""
+    # 1. חישוב ממוצעים נעים
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    df['MA200'] = df['Close'].rolling(window=200).mean()
+
+    # 2. חישוב מדד RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # 3. חישוב רמות פיבונאצ'י שנתיות
+    df_last_year = df.iloc[-252:]
+    highest_high = df_last_year['High'].max()
+    lowest_low = df_last_year['Low'].min()
+    price_range = highest_high - lowest_low
+
+    fib_levels = {
+        '0.0%': highest_high,
+        '23.6%': highest_high - (0.236 * price_range),
+        '38.2%': highest_high - (0.382 * price_range),
+        '50.0%': highest_high - (0.500 * price_range),
+        '61.8%': highest_high - (0.618 * price_range),
+        '100.0%': lowest_low
+    }
+
+    current_price = df['Close'].iloc[-1]
+    current_rsi = df['RSI'].iloc[-1]
+    ma200_curr = df['MA200'].iloc[-1]
+
+    # 4. מנוע ניקוד (Score) והחלטה
+    score = 0
+    if current_price > ma200_curr:
+        score += 1
+    else:
+        score -= 1
+
+    if current_rsi > 70:
+        score -= 2
+    elif current_rsi < 30:
+        score += 2
+
+    if score >= 2:
+        verdict = "🟢 הזדמנות קנייה (Buy)"
+    elif score <= -1:
+        verdict = "🔴 להמתין לירידה (Wait)"
+    else:
+        verdict = "🟡 ניטרלי / החזק (Hold)"
+
+    # 5. מציאת רמת התמיכה הקרובה ביותר מתחת למחיר
+    waiting_target = fib_levels['61.8%']
+    for level_name, level_val in sorted(fib_levels.items(), key=lambda x: x[1]):
+        if level_val < current_price:
+            waiting_target = level_val
+
+    # 6. חישובי מחשבון סיכונים ותקציב
+    stop_loss_price = waiting_target * 0.97
+    allowed_loss_usd = investment_amount * (risk_percent / 100)
+    risk_per_share = current_price - stop_loss_price
+    
+    if risk_per_share <= 0:
+        risk_per_share = current_price * 0.05
+        stop_loss_price = current_price * 0.95
+
+    total_shares_to_buy = int(allowed_loss_usd / risk_per_share)
+    if (total_shares_to_buy * current_price) > investment_amount:
+        total_shares_to_buy = int(investment_amount / current_price)
+
+    # אסטרטגיית פיצול (60/40)
+    shares_p1 = int(total_shares_to_buy * 0.60)
+    shares_p2 = total_shares_to_buy - shares_p1
+
+    return {
+        "df": df, "info": info, "verdict": verdict, "current_price": current_price,
+        "current_rsi": current_rsi, "waiting_target": waiting_target,
+        "stop_loss_price": stop_loss_price, "allowed_loss_usd": allowed_loss_usd,
+        "total_shares_to_buy": total_shares_to_buy, "shares_p1": shares_p1,
+        "shares_p2": shares_p2, "cost_p1": shares_p1 * current_price,
+        "cost_p2": shares_p2 * waiting_target
+    }
+import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 from datetime import datetime, timedelta
+# ייבוא הפונקציות מהקובץ השני שלנו
+from indicators import load_stock_data, analyze_ticker
 
-# הגדרת תצורת הדף
-st.set_page_config(page_title="מנוע ניתוח טכני", layout="wide")
-
-st.title("📈 מנוע ניתוח טכני והפקת דוחות השקעה")
-st.write("המערכת מנתחת את נתוני המניה ומפיקה סיכום המלצות מנומק המבוסס על אסטרטגיות מסחר קלאסיות.")
+# הגדרות דף
+st.set_page_config(page_title="מנוע ניתוח משולב", layout="wide")
+st.title("🎯 מנוע סריקה משולב ומחשבון ניהול סיכונים")
 
 # --- סרגל צדי (Sidebar) ---
-st.sidebar.header("הגדרות פיתוח וחיפוש")
-ticker = st.sidebar.text_input("הכנס סימול מניה (Ticker):", value="AAPL").upper()
+st.sidebar.header("💰 הגדרות תקציב וסיכונים")
+investment_amount = st.sidebar.number_input("סכום להשקעה פנויה ($):", min_value=100, value=10000, step=500)
+risk_percent = st.sidebar.slider("אחוז סיכון מקסימלי מהתיק (%):", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
 
-# נדרש טווח נתונים מספיק רחב (לפחות שנה) כדי לחשב ממוצע נע 200 בצורה תקינה
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 בחירת מניות לסריקה")
+ticker_1 = st.sidebar.text_input("מניה ראשונה:", value="AAPL").upper()
+ticker_2 = st.sidebar.text_input("מניה שנייה:", value="NVDA").upper()
+
 end_date = datetime.today()
-start_date = end_date - timedelta(days=365 * 2) # שנתיים אחורה לגיבוי נתונים
+start_date = end_date - timedelta(days=365 * 2)
 
+# טעינת נתונים (שימוש ב-Streamlit Cache לעטיפת הפונקציה המיובאת)
 @st.cache_data(ttl=3600)
-def load_stock_data(ticker_symbol, start, end):
-    stock_obj = yf.Ticker(ticker_symbol)
-    hist_df = stock_obj.history(start=start, end=end)
-    info_dict = stock_obj.info
-    return hist_df, info_dict
+def get_cached_data(ticker, start, end):
+    return load_stock_data(ticker, start, end)
 
-try:
-    with st.spinner('מנתח נתוני שוק ומחשב אינדיקטורים...'):
-        df, info = load_stock_data(ticker, start_date, end_date)
+with st.spinner('מריץ סריקה וניתוח נתונים במקביל...'):
+    df1, info1 = get_cached_data(ticker_1, start_date, end_date)
+    df2, info2 = get_cached_data(ticker_2, start_date, end_date)
 
-    if df.empty or len(df) < 50:
-        st.error("לא נמצאו מספיק נתונים היסטוריים לביצוע הניתוח הטכני.")
-    else:
-        # =========================================================
-        # 🧪 חלק 1: חישוב אינדיקטורים טכניים (הלוגיקה המתמטית)
-        # =========================================================
+if not df1 or not df2:
+    st.error("שגיאה: אחד או שניים מסימולי המניות אינם תקינים או שחסרים נתונים.")
+else:
+    # הרצת הניתוח דרך קובץ האינדיקטורים המופרד
+    res1 = analyze_ticker(df1, info1, investment_amount, risk_percent)
+    res2 = analyze_ticker(df2, info2, investment_amount, risk_percent)
+
+    # --- 1. טבלת השוואה מהירה ---
+    st.subheader("📋 לוח סריקה והשוואה מהירה")
+    summary_table = {
+        "פרמטר": ["שם החברה", "מחיר נוכחי", "מדד מומנטום RSI", "המלצה טכנית", "יעד כניסה/תמיכה"],
+        ticker_1: [res1['info'].get('longName', ticker_1), f"${res1['current_price']:.2f}", f"{res1['current_rsi']:.1f}", res1['verdict'], f"${res1['waiting_target']:.2f}"],
+        ticker_2: [res2['info'].get('longName', ticker_2), f"${res2['current_price']:.2f}", f"{res2['current_rsi']:.1f}", res2['verdict'], f"${res2['waiting_target']:.2f}"]
+    }
+    st.table(pd.DataFrame(summary_table).set_index("פרמטר"))
+
+    # --- 2. מחשבון ניהול סיכונים (טאבים) ---
+    st.markdown("---")
+    st.subheader("🧮 מחשבון ניהול סיכונים והנחיות חלוקת תקציב")
+    
+    def show_ui_metrics(res, ticker_name):
+        col1, col2, col3 = st.columns(3)
+        col1.metric("סך מניות מומלץ לקנייה", f"{res['total_shares_to_buy']} יחידות")
+        col2.metric("תקציב מנוצל בפועל", f"${(res['cost_p1'] + res['cost_p2']):,.2f}")
+        col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res['stop_loss_price']:.2f}")
         
-        # A. ממוצעים נעים (MA20, MA50, MA200)
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA50'] = df['Close'].rolling(window=50).mean()
-        df['MA200'] = df['Close'].rolling(window=200).mean()
-
-        # B. מדד כוח יחסי (RSI - 14 ימים)
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-
-        # C. רמות תיקון פיבונאצ'י (מבוסס על השנה האחרונה)
-        df_last_year = df.last('365D') if hasattr(df, 'last') else df.iloc[-252:]
-        highest_high = df_last_year['High'].max()
-        lowest_low = df_last_year['Low'].min()
-        price_range = highest_high - lowest_low
-
-        fib_levels = {
-            '0.0% (שיא)': highest_high,
-            '23.6%': highest_high - (0.236 * price_range),
-            '38.2%': highest_high - (0.382 * price_range),
-            '50.0% (מרכז)': highest_high - (0.500 * price_range),
-            '61.8% (תמיכת זהב)': highest_high - (0.618 * price_range),
-            '100.0% (שפל)': lowest_low
-        }
-
-        # נתונים נוכחיים לשורה התחתונה
-        current_price = df['Close'].iloc[-1]
-        current_rsi = df['RSI'].iloc[-1]
-        ma50_curr = df['MA50'].iloc[-1]
-        ma200_curr = df['MA200'].iloc[-1]
-
-        # =========================================================
-        # 📊 חלק 2: הצגת גרפים מורחבים (מחיר + RSI)
-        # =========================================================
-        st.subheader(f"📊 תמונת מצב טכנית: {info.get('longName', ticker)}")
-        
-        # יצירת גרף עם שני פאנלים (Subplots) - עליון למחיר, תחתון ל-RSI
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                            vertical_spacing=0.05, row_heights=[0.7, 0.3])
-
-        # פאנל 1: נרות יפניים וממוצעים נעים
-        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="מחיר"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], line=dict(color='orange', width=1.5), name="ממוצע נע 50"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='red', width=1.5), name="ממוצע נע 200"), row=1, col=1)
-        
-        # הוספת קווי פיבונאצ'י אופקיים לגרף המחיר
-        for level, value in fib_levels.items():
-            fig.add_shape(type="line", x0=df.index[0], y0=value, x1=df.index[-1], y1=value,
-                          line=dict(color="gray", width=1, dash="dash"), row=1, col=1)
-
-        # פאנל 2: מתנד RSI
-        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1.5), name="RSI"), row=2, col=1)
-        # קווי גבול של קנוי יתר (70) ומכור יתר (30)
-        fig.add_shape(type="line", x0=df.index[0], y0=70, x1=df.index[-1], y1=70, line=dict(color="red", width=1, dash="dot"), row=2, col=1)
-        fig.add_shape(type="line", x0=df.index[0], y0=30, x1=df.index[-1], y1=30, line=dict(color="green", width=1, dash="dot"), row=2, col=1)
-
-        fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=600, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
-
-        # =========================================================
-        # 🤖 חלק 3: מנוע החלטות והפקת דוח מנומק (The AI/Logic Engine)
-        # =========================================================
-        st.markdown("---")
-        st.subheader("📋 דוח ניתוח טכני מנומק ומערכת החלטות")
-
-        # מערכת חוקים לשקלול נקודות (Score)
-        score = 0
-        reasons_buy = []
-        reasons_wait = []
-
-        # 1. בדיקת מגמה ארוכת טווח (ממוצעים נעים)
-        if current_price > ma200_curr:
-            score += 1
-            reasons_buy.append(f"**מגמה ראשית חיובית:** המחיר הנוכחי (${current_price:.2f}) נמצא מעל ממוצע נע 200 (${ma200_curr:.2f}), מה שמעיד על מומנטום שורי ארוך טווח.")
-        else:
-            score -= 1
-            reasons_wait.append(f"**מגמה ראשית שלילית:** המחיר נסחר מתחת לממוצע נע 200 (${ma200_curr:.2f}). כניסה כעת היא מסוכנת ונוגדת את המגמה הכללית.")
-
-        # 2. בדיקת מתנד מומנטום (RSI)
-        if current_rsi > 70:
-            score -= 2
-            reasons_wait.append(f"**קניית יתר קיצונית (Overbought):** מדד ה-RSI עומד על {current_rsi:.1f} (מעל 70). הנכס 'יקר' בטווח הקצר ויש סיכוי גבוה לתיקון טכני מטה בהקדם.")
-        elif current_rsi < 30:
-            score += 2
-            reasons_buy.append(f"**מכירת יתר עמוקה (Oversold):** מדד ה-RSI עומד על {current_rsi:.1f} (מתחת ל-30). הירידות עשויות להיות מוגזמות, ויש פוטנציאל לזינוק/ריבאונד קרוב.")
-        else:
-            reasons_buy.append(f"**מומנטום ניטרלי:** ה-RSI עומד על {current_rsi:.1f}, אין כרגע מצב קיצון של קנייה או מכירה.")
-
-        # 3. בדיקת מיקום ביחס לרמות פיבונאצ'י ומציאת נקודת המתנה
-        closest_fib_level = None
-        closest_fib_dist = float('inf')
-        for level_name, level_val in fib_levels.items():
-            dist = abs(current_price - level_val)
-            if dist < closest_fib_dist:
-                closest_fib_dist = dist
-                closest_fib_level = level_name
-
-        # מציאת רמת התמיכה הקרובה ביותר מתחת למחיר (אם נרצה להמתין לירידה)
-        waiting_target = fib_levels['61.8% (תמיכת זהב)']
-        for level_name, level_val in sorted(fib_levels.items(), key=lambda x: x[1]):
-            if level_val < current_price:
-                waiting_target = level_val # רמת התמיכה הטכנית הקרובה ביותר מתחת למחיר
-
-        # קביעת השורה התחתונה לפי הציון המשוקלל
-        if score >= 2:
-            verdict = "🟢 הזדמנות קנייה (Buy Signal)"
-            color_box = "success"
-            detailed_advise = "הפרמטרים הטכניים מסתנכרנים לנקודת כניסה נוחה. המומנטום תומך בעלייה, והסיכון יחסית נמוך בהשוואה לפוטנציאל."
-        elif score <= -1:
-            verdict = "🔴 להמתין לירידה / אל תקנה (Wait / Avoid)"
-            color_box = "error"
-            detailed_advise = f"השוק מראה סימני עייפות או מגמת ירידה ברורה. מומלץ להמתין לתיקון ומחיר נוח יותר באזור רמת התמיכה הקרובה."
-        else:
-            verdict = "🟡 החזק / המתנה מחוץ לשוק (Hold / Neutral)"
-            color_box = "warning"
-            detailed_advise = "אין הכרעה ברורה בין הקונים למוכרים. המחיר נמצא באזור דשדוש או באמצע הטווח. זה הזמן להמתין לפריצה ברורה של רמות המפתח."
-
-        # הצגת תיבת ההחלטה למשתמש
-        if color_box == "success": st.success(f"**השורה התחתונה של המערכת:** {verdict}")
-        elif color_box == "warning": st.warning(f"**השורה התחתונה של המערכת:** {verdict}")
-        else: st.error(f"**השורה התחתונה של המערכת:** {verdict}")
-
-        # חלוקה לטורים מנומקים
-        col_b, col_w = st.columns(2)
-        with col_b:
-            st.write("👍 **נימוקים התומכים בקנייה/החזקה:**")
-            for r in reasons_buy: st.write(f"- {r}")
-        with col_w:
-            st.write("⚠️ **נימוקים הקוראים לזהירות/המתנה:**")
-            for r in reasons_wait: st.write(f"- {r}")
-
-        # אסטרטגיית פעולה אופרטיבית לפי הכתבה
-        st.write("### 🎯 תוכנית עבודה אופרטיבית למשקיע:")
-        st.info(f"""
-        1. **הנחיית פעולה:** {detailed_advise}
-        2. **רמת מחיר להמתנה/איסוף:** במידה וממתינים לירידה, רמת התמיכה הטכנית המרכזית (פיבונאצ'י) נמצאת ב-**${waiting_target:.2f}**.
-        3. **ניהול סיכונים (חוק ה-1%-2% מתוך הכתבה):** אם בחרת להיכנס לעסקה, הגדר פקודת קטיעת הפסד (**Stop Loss**) קצת מתחת לרמת התמיכה הקרובה. ודא כי פוטנציאל הרווח שלך גדול לפחות פי 2 מהסיכון הכלכלי בעסקה.
+        st.markdown(f"""
+        🧱 **מתווה פיצול הקניות האופטימלי עבור {ticker_name}:**
+        * **שלב א' (כניסה מיידית - 60%):** קנה **{res['shares_p1']}** מניות במחיר נוכחי (**${res['current_price']:.2f}**). שווי: `${res['cost_p1']:,.2f}`.
+        * **שלב ב' (המתנה לירידה - 40%):** הגדר פקודת Limit של **{res['shares_p2']}** מניות בתמיכה (**${res['waiting_target']:.2f}**). שווי: `${res['cost_p2']:,.2f}`.
+        * **⚠️ רמת בטיחות:** יציאה בתוך הפסד ב-**${res['stop_loss_price']:.2f}**. סיכון תיק מוגן על: `${res['allowed_loss_usd']:.2f}`.
         """)
 
-except Exception as e:
-    st.error(f"התרחשה שגיאה במהלך הניתוח הטכני: {e}")
+    t1, t2 = st.tabs([f"💰 תוכנית מסחר {ticker_1}", f"💰 תוכנית מסחר {ticker_2}"])
+    with t1: show_ui_metrics(res1, ticker_1)
+    with t2: show_ui_metrics(res2, ticker_2)
+
+    # --- 3. גרפים טכניים בתחתית ---
+    st.markdown("---")
+    st.subheader("📉 גרפים טכניים להרחבה ומעקב")
+    
+    def plot_graph(res):
+        df = res['df']
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA50'], line=dict(color='orange', width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='red', width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1.2)), row=2, col=1)
+        fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=350, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+
+    cg1, cg2 = st.columns(2)
+    with cg1: plot_graph(res1)
+    with cg2: plot_graph(res2)
