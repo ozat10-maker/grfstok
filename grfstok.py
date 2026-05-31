@@ -28,18 +28,15 @@ start_date = end_date - timedelta(days=365 * 2)
 # =========================================================
 # 🧠 חלק 2: פונקציות הניתוח והלוגיקה האלגוריתמית
 # =========================================================
-@st.cache_data(ttl=3600)
 def load_stock_data(ticker_symbol, start, end):
     """משיכת נתונים מ-Yahoo Finance עם הגנה מפני שגיאות"""
     try:
         stock_obj = yf.Ticker(ticker_symbol)
         hist_df = stock_obj.history(start=start, end=end)
         info_dict = stock_obj.info
-        if hist_df.empty or len(hist_df) < 200:
-            return None, None
         return hist_df, info_dict
     except:
-        return None, None
+        return pd.DataFrame(), {}
 
 def analyze_ticker(df, info, investment_amount, risk_percent):
     """מנוע הניתוח הטכני, הניקוד וניהול הסיכונים"""
@@ -131,8 +128,9 @@ with st.spinner('מריץ סריקה וניתוח נתונים במקביל...')
     df1, info1 = load_stock_data(ticker_1, start_date, end_date)
     df2, info2 = load_stock_data(ticker_2, start_date, end_date)
 
-if not df1 or not df2:
-    st.error("שגיאה: אחד או שניים מסימולי המניות אינם תקינים או שחסרים נתונים היסטוריים.")
+# תיקון תנאי הבדיקה: מוודא שהטבלאות קיימות, מכילות מספיק שורות ואינן ריקות
+if df1.empty or df2.empty or len(df1) < 200 or len(df2) < 200:
+    st.error("שגיאה: אחד או שניים מסימולי המניות אינם תקינים או שחסרים נתונים היסטוריים מספיקים בשרת.")
 else:
     # הרצת הניתוח באמצעות הפונקציות המובנות
     res1 = analyze_ticker(df1, info1, investment_amount, risk_percent)
@@ -160,7 +158,7 @@ else:
         st.markdown(f"""
         🧱 **מתווה פיצול הקניות האופטימלי עבור {ticker_name}:**
         * **שלב א' (כניסה מיידית - 60%):** קנה **{res['shares_p1']}** מניות במחיר נוכחי (**${res['current_price']:.2f}**). שווי: `${res['cost_p1']:,.2f}`.
-        * **שלב B' (המתנה לירידה - 40%):** הגדר פקודת Limit של **{res['shares_p2']}** מניות בתמיכה (**${res['waiting_target']:.2f}**). שווי: `${res['cost_p2']:,.2f}`.
+        * **שלב ב' (המתנה לירידה - 40%):** הגדר פקודת Limit של **{res['shares_p2']}** מניות בתמיכה (**${res['waiting_target']:.2f}**). שווי: `${res['cost_p2']:,.2f}`.
         * **⚠️ רמת בטיחות:** יציאה בתוך הפסד ב-**${res['stop_loss_price']:.2f}**. סיכון תיק מוגן על: `${res['allowed_loss_usd']:.2f}`.
         """)
 
