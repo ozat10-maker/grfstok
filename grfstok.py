@@ -42,12 +42,13 @@ start_date = end_date - timedelta(days=365 * 2)
 # 🧠 חלק 2: פונקציות הניתוח והלוגיקה האלגוריתמית
 # =========================================================
 def load_stock_data(ticker_symbol, start, end):
-    """משיכת נתונים מ-Yahoo Finance עם הגנה מפני שגיאות"""
+    """משיכת נתונים מ-Yahoo Finance עם הגנה מפני שגיאות והתאמת ספליטים"""
     if not ticker_symbol:
         return pd.DataFrame(), {}
     try:
         stock_obj = yf.Ticker(ticker_symbol)
-        hist_df = stock_obj.history(start=start, end=end)
+        # auto_adjust=True מתקן ומנרמל עיוותים של ספליטים ודיבידנדים בהיסטוריה
+        hist_df = stock_obj.history(start=start, end=end, auto_adjust=True)
         info_dict = stock_obj.info
         return hist_df, info_dict
     except:
@@ -82,7 +83,7 @@ def calculate_portfolio_value(portfolio):
     return total_val, shares_values
 
 def analyze_ticker(df, info, investment_amount, risk_percent, ticker_name, portfolio_total_value, current_holding_value, selected_risk_profile):
-    """מנוע הניתוח הטכני, הניקוד וניהול הסיכונים המשודרג כולל נימוקים"""
+    """מנוע הניתוח הטכני, הניקוד וניהול הסיכונים המשודרג כולל נימוקים והגנת חריגות"""
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['MA200'] = df['Close'].rolling(window=200).mean()
 
@@ -108,7 +109,6 @@ def analyze_ticker(df, info, investment_amount, risk_percent, ticker_name, portf
     ma50_curr = df['MA50'].iloc[-1]
     ma200_curr = df['MA200'].iloc[-1]
 
-    # בניית סיכום הניתוח בתור רשימת משפטים הסבריים
     analysis_reasons = []
     score = 0
     
@@ -160,9 +160,17 @@ def analyze_ticker(df, info, investment_amount, risk_percent, ticker_name, portf
         verdict = "🟡 ניטרלי / החזק (Hold)"
         verdict_type = "HOLD"
 
+    # מציאת רמת תמיכה מפיבונאצ'י
     waiting_target = fib_levels['61.8%']
     for level_name, level_val in sorted(fib_levels.items(), key=lambda x: x):
-        if level_val < current_price: waiting_target = level_val
+        if level_val < current_price: 
+            waiting_target = level_val
+
+    # 🛑 מנגנון הגנה מפני חריגות: אם רמת התמיכה רחוקה באופן לא הגיוני (מעל 20% מהמחיר הנוכחי)
+    # המערכת תציב את ממוצע נע 50 בתור רמת התמיכה הריאלית הקרובה ביותר
+    if (current_price - waiting_target) / current_price > 0.20 and pd.notna(ma50_curr):
+        waiting_target = ma50_curr
+        analysis_reasons.append(f"רמות פיבונאצ'י רחוקות מדי בשל תנודתיות היסטורית. המערכת קבעה את ממוצע נע 50 (${ma50_curr:.2f}) כרמת תמיכה דינמית ריאלית.")
 
     stop_loss_price = waiting_target * sl_multiplier
     allowed_loss_usd = investment_amount * (risk_percent / 100)
@@ -242,7 +250,6 @@ else:
         st.write("### 📝 סיכום תהליך הניתוח והממצאים הטכניים")
         st.write(f"הדוח מותאם אישית עבור פרופיל משקיע: **{risk_profile}**.")
         
-        # הדפסת הנימוקים שחולצו מהאלגוריתם
         for reason in res1['analysis_reasons']:
             st.write(f"🔹 {reason}")
         if has_second_stock:
@@ -304,9 +311,7 @@ else:
         else:
             plot_graph(res1)
 
-        # =========================================================
-        # ⚠️ חלק 4: הבהרה משפטית ואזהרת סיכון (Disclaimer)
-        # =========================================================
+        # --- ה. הבהרה משפטית ואזהרת סיכון ---
         st.markdown("---")
         st.caption("""
         **⚠️ אזהרת סיכון והבהרה משפטית:** 
