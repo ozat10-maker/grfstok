@@ -2,7 +2,7 @@ import yfinance as yf
 import pandas as pd
 
 def load_stock_data(ticker_symbol, start, end):
-    """משיכת נתונים מ-Yahoo Finance הגנה מפני שגיאות"""
+    """משיכת נתונים מ-Yahoo Finance עם הגנה מפני שגיאות"""
     try:
         stock_obj = yf.Ticker(ticker_symbol)
         hist_df = stock_obj.history(start=start, end=end)
@@ -66,7 +66,7 @@ def analyze_ticker(df, info, investment_amount, risk_percent):
 
     # 5. מציאת רמת התמיכה הקרובה ביותר מתחת למחיר
     waiting_target = fib_levels['61.8%']
-    for level_name, level_val in sorted(fib_levels.items(), key=lambda x: x[1]):
+    for level_name, level_val in sorted(fib_levels.items(), key=lambda x: x):
         if level_val < current_price:
             waiting_target = level_val
 
@@ -100,10 +100,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 from datetime import datetime, timedelta
-# ייבוא הפונקציות מהקובץ השני שלנו
+# ייבוא הפונקציות מקובץ הלוגיקה המקביל
 from indicators import load_stock_data, analyze_ticker
 
-# הגדרות דף
+# הגדרות דף ב-Streamlit
 st.set_page_config(page_title="מנוע ניתוח משולב", layout="wide")
 st.title("🎯 מנוע סריקה משולב ומחשבון ניהול סיכונים")
 
@@ -130,7 +130,7 @@ with st.spinner('מריץ סריקה וניתוח נתונים במקביל...')
     df2, info2 = get_cached_data(ticker_2, start_date, end_date)
 
 if not df1 or not df2:
-    st.error("שגיאה: אחד או שניים מסימולי המניות אינם תקינים או שחסרים נתונים.")
+    st.error("שגיאה: אחד או שניים מסימולי המניות אינם תקינים או שחסרים נתונים היסטוריים.")
 else:
     # הרצת הניתוח דרך קובץ האינדיקטורים המופרד
     res1 = analyze_ticker(df1, info1, investment_amount, risk_percent)
