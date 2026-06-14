@@ -1,403 +1,341 @@
 import streamlit as st
 import yfinance as yf
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import pandas as pd
-import plotly.express as px
 import numpy as np
-import os
-import time
-from google import genai
-from google.genai import types
+from datetime import datetime, timedelta
 
-# הגדרת תצורת הדף - תמיכה ברוחב מלא וכותרת מערכת
-st.set_page_config(page_title="מערכת AI לניהול סיכוני השקעות", page_icon="📊", layout="wide")
+# =========================================================
+# ⚙️ חלק 1: הגדרות דף ותשתית האפליקציה
+# =========================================================
+st.set_page_config(page_title="מנוע ניתוח משולב", layout="wide")
+st.title("🎯 מנוע ניתוח טכני ומחשבון ניהול סיכונים")
+st.write("המערכת מנתחת מניה בודדת או משווה בין שתיים, ומפיקה תוכנית מסחר המבוססת על רצועות בולינגר ותבניות נרות.")
 
-# הזרקת CSS לתמיכה ביישור לימין (RTL) עבור הממשק בעברית
-st.markdown("""
-    <style>
-    body, [data-testid="stSidebar"], .stApp {
-        direction: rtl;
-        text-align: right;
-    }
-    /* תיקון כיווניות לתיבות קלט ומדדים שצריכים להישאר משמאל לימין או מיושרים כראוי */
-    input, select, .stMetric {
-        direction: ltr;
-        text-align: left;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-CSV_FILE = "portfolio.csv"
-def save_portfolio_to_file():
-    """שמירת מצב התיק הנוכחי לקובץ CSV מקומי"""
-    if st.session_state.portfolio:
-        df = pd.DataFrame(st.session_state.portfolio)
-        df.to_csv(CSV_FILE, index=False)
-    else:
-        if os.path.exists(CSV_FILE): 
-            os.remove(CSV_FILE)
-
-def load_portfolio_from_file():
-    """טעינת התיק השמור מהמחשב במידה וקיים"""
-    if os.path.exists(CSV_FILE) and not st.session_state.portfolio:
-        try:
-            df = pd.read_csv(CSV_FILE)
-            st.session_state.portfolio = df.to_dict(orient="records")
-        except: 
-            st.session_state.portfolio = []
-
-# אתחול משתני State גלובליים למערכת
-if "page" not in st.session_state: 
-    st.session_state.page = "setup"
-if "portfolio" not in st.session_state: 
-    st.session_state.portfolio = []
-
-# טעינה ראשונית של התיק
-load_portfolio_from_file()
-# --- תפריט צד: הגדרות מערכת וסיכון ---
-st.sidebar.header("⚙️ הגדרות מערכת וסיכון")
-
-# ניהול מפתח ה-API של Gemini
-if "GEMINI_API_KEY" in st.secrets:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    st.sidebar.success("✅ מפתח API נטען אוטומטית")
-else:
-    api_key = st.sidebar.text_input("הזן מפתח API של Gemini:", type="password")
-
-# פרופיל סיכון והון להשקעה
-risk_profile = st.sidebar.selectbox("פרופיל סיכון מועדף:", ["Conservative", "Moderate", "Aggressive"])
-additional_capital = st.sidebar.number_input("הון חדש פנוי להשקעה ($):", min_value=0, value=3000)
+# --- סרגל צדי (Sidebar) ---
+st.sidebar.header("👤 פרופיל משקיע ורמת סיכון")
+risk_profile = st.sidebar.selectbox(
+    "בחר את רמת הסיכון המתאימה לך:",
+    ["סולידי (Conservative)", "מאוזן (Moderate)", "אגרסיבי (Aggressive)"],
+    index=1
+)
 
 st.sidebar.markdown("---")
-st.sidebar.header("🌐 הגדרות שפה")
-report_lang = st.sidebar.radio("שפת דוח ה-AI:", ["עברית (Hebrew)", "אנגלית (English)"])
+st.sidebar.header("💰 הגדרות תקציב וסיכונים")
+investment_amount = st.sidebar.number_input("סכום להשקעה פנויה ($):", min_value=100, value=10000, step=500)
+risk_percent = st.sidebar.slider("אחוז סיכון מקסימלי מהתיק (%):", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
 
-@st.cache_data(ttl=900)
-def fetch_stock_advanced_engine(ticker_str):
-    """שליפת נתוני שוק בזמן אמת, חדשות, מדדי סיכון ומדדים פונדמנטליים מורחבים"""
+st.sidebar.markdown("---")
+st.sidebar.header("💼 תיק ההשקעות הנוכחי שלך (אופציונלי)")
+portfolio_input = st.sidebar.text_input("הזן מניות וכמויות (למשל: AAPL:10, NVDA:5):", value="")
+
+st.sidebar.markdown("---")
+st.sidebar.header("🔍 בחירת מניות לסריקה")
+ticker_1 = st.sidebar.text_input("מניה ראשונה (חובה):", value="AAPL").upper().strip()
+ticker_2 = st.sidebar.text_input("מניה שנייה (אופציונלי):", value="").upper().strip()
+
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365 * 2)
+
+# =========================================================
+# 🧠 חלק 2: פונקציות הניתוח והלוגיקה האלגוריתמית
+# =========================================================
+def load_stock_data(ticker_symbol, start, end):
+    """משיכת נתונים מ-Yahoo Finance עם הגנה מפני שגיאות והתאמת ספליטים"""
+    if not ticker_symbol:
+        return pd.DataFrame(), {}
     try:
-        stock = yf.Ticker(ticker_str)
-        hist = stock.history(period="200d")
-        if hist.empty: 
-            return None
+        stock_obj = yf.Ticker(ticker_symbol)
+        hist_df = stock_obj.history(start=start, end=end, auto_adjust=True)
+        info_dict = stock_obj.info
+        return hist_df, info_dict
+    except:
+        return pd.DataFrame(), {}
+
+def parse_portfolio(portfolio_str):
+    """תרגום מחרוזת הטקסט של התיק למילון פייתון קריא"""
+    portfolio = {}
+    if not portfolio_str:
+        return portfolio
+    try:
+        parts = portfolio_str.split(",")
+        for part in parts:
+            if ":" in part:
+                tick, qty = part.split(":")
+                portfolio[tick.upper().strip()] = float(qty.strip())
+    except:
+        st.sidebar.error("פורמט הזנת התיק שגוי. השתמש בפורמט TICKER:QTY")
+    return portfolio
+
+def calculate_portfolio_value(portfolio):
+    """חישוב השווי הכולל של התיק הקיים בזמן אמת"""
+    total_val = 0.0
+    shares_values = {}
+    for tick, qty in portfolio.items():
+        df, _ = load_stock_data(tick, datetime.today() - timedelta(days=5), datetime.today())
+        if not df.empty:
+            price = df['Close'].iloc[-1]
+            current_value = price * qty
+            total_val += current_value
+            shares_values[tick] = current_value
+    return total_val, shares_values
+
+def analyze_ticker(df, info, investment_amount, risk_percent, ticker_name, portfolio_total_value, current_holding_value, selected_risk_profile):
+    """מנוע הניתוח הטכני המשודרג הכולל רצועות בולינגר וזיהוי תבניות נרות יפניים"""
+    # 1. חישוב אינדיקטורים קלאסיים (ממוצעים ו-RSI)
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    df['MA200'] = df['Close'].rolling(window=200).mean()
+    
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # 2. חישוב רצועות בולינגר (Bollinger Bands - 20 יום, 2 סטיות תקן)
+    df['BB_Middle'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
+    df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
+
+    # 3. זיהוי מתמטי של תבניות נרות (עבור הנר האחרון בגרף)
+    open_p = df['Open'].iloc[-1]
+    high_p = df['High'].iloc[-1]
+    low_p = df['Low'].iloc[-1]
+    close_p = df['Close'].iloc[-1]
+    
+    body_size = abs(close_p - open_p)
+    total_range = high_p - low_p if (high_p - low_p) > 0 else 0.01
+    lower_shade = (open_p - low_p) if close_p >= open_p else (close_p - low_p)
+    upper_shade = (high_p - close_p) if close_p >= open_p else (high_p - open_p)
+
+    is_doji = body_size <= (total_range * 0.10)
+    is_hammer = (lower_shade >= (body_size * 2)) and (upper_shade <= (body_size * 0.5))
+
+    # 4. חישוב רמות פיבונאצ'י
+    df_last_year = df.iloc[-252:]
+    highest_high = df_last_year['High'].max()
+    lowest_low = df_last_year['Low'].min()
+    price_range = highest_high - lowest_low
+    fib_618 = highest_high - (0.618 * price_range)
+
+    current_price = df['Close'].iloc[-1]
+    current_rsi = df['RSI'].iloc[-1]
+    ma50_curr = df['MA50'].iloc[-1]
+    ma200_curr = df['MA200'].iloc[-1]
+    bb_lower_curr = df['BB_Lower'].iloc[-1]
+    bb_upper_curr = df['BB_Upper'].iloc[-1]
+
+    analysis_reasons = []
+    score = 0
+    
+    # שיקולי מגמה ומומנטום
+    if current_price > ma200_curr:
+        score += 1
+        analysis_reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע נע 200 השוכן ב-${ma200_curr:.2f}).")
+    else:
+        score -= 1
+        analysis_reasons.append(f"המניה במגמת ירידה ארוכת טווח (מתחת לממוצע נע 200 השוכן ב-${ma200_curr:.2f}).")
+
+    if current_rsi > 70:
+        score -= 2
+        analysis_reasons.append(f"מדד ה-RSI עומד על {current_rsi:.1f} - מצב קניית-יתר.")
+    elif current_rsi < 30:
+        score += 2
+        analysis_reasons.append(f"מדד ה-RSI עומד על {current_rsi:.1f} - מצב מכירת-יתר.")
+
+    # 🛑 שילוב רצועות בולינגר ותבניות נרות במנוע הניקוד
+    candle_pattern_detected = "אין תבנית מיוחדת"
+    if current_price <= (bb_lower_curr * 1.02):
+        score += 1
+        analysis_reasons.append(f"המחיר קרוב מאוד לרצועת בולינגר התחתונה (${bb_lower_curr:.2f}), מה שמסמן רמת מחיר זולה סטטיסטית.")
+        if is_hammer:
+            score += 2
+            candle_pattern_detected = "🔨 נר פטיש שורי (Hammer) על רצועת בולינגר התחתונה"
+            analysis_reasons.append("🔥 איתות חזק: זוהה נר פטיש (Hammer) שורי על רצועת בולינגר התחתונה, המעיד על היפוך מגמה קרוב כלפי מעלה.")
+        elif is_doji:
+            score += 1
+            candle_pattern_detected = "⭐ נר דוג'י (Doji) על רצועת בולינגר התחתונה"
+            analysis_reasons.append("זוהה נר דוג'י (Doji) ברמת שפל, המעיד על בלימת לחץ המוכרים והתעוררות מאבק קונים.")
+    elif current_price >= (bb_upper_curr * 0.98):
+        score -= 1
+        analysis_reasons.append(f"המחיר הגיע לרצועת בולינגר העליונה (${bb_upper_curr:.2f}), נחשב ליקר סטטיסטית בטווח הקצר.")
+    else:
+        if is_hammer: candle_pattern_detected = "נר פטיש (Hammer) באמצע הטווח"
+        elif is_doji: candle_pattern_detected = "נר דוג'י (Doji) באמצע הטווח"
+
+    # שיקולי חשיפת יתר בתיק
+    total_capital = investment_amount + portfolio_total_value
+    exposure_warning = False
+    exposure_factor = 1.0
+    if total_capital > 0:
+        current_exposure_pct = (current_holding_value / total_capital) * 100
+        if current_exposure_pct > 25.0:
+            score -= 1
+            exposure_warning = True
+            exposure_factor = 0.5
+            analysis_reasons.append("נמצאה חשיפת יתר של מניה זו בתיק שלך (מעל 25%), כמויות הקנייה הופחתו.")
+
+    # קביעת סף לפי פרופיל סיכון
+    if "סולידי" in selected_risk_profile:
+        buy_threshold, sl_multiplier = 2, 0.98
+    elif "אגרסיבי" in selected_risk_profile:
+        buy_threshold, sl_multiplier = 0, 0.94
+    else:
+        buy_threshold, sl_multiplier = 1, 0.96
+
+    if score >= buy_threshold:
+        verdict, verdict_type = "🟢 הזדמנות קנייה (Buy)", "BUY"
+    elif score < 0:
+        verdict, verdict_type = "🔴 להמתין לירידה (Wait)", "WAIT"
+    else:
+        verdict, verdict_type = "🟡 ניטרלי / החזק (Hold)", "HOLD"
+
+    # קביעת יעד המתנה
+    waiting_target = bb_lower_curr if pd.notna(bb_lower_curr) else current_price * 0.95
+    if (current_price - waiting_target) / current_price > 0.20 and pd.notna(ma50_curr):
+        waiting_target = ma50_curr
+        analysis_reasons.append(f"התמיכה הטכנית הריאלית נקבעה על ממוצע נע 50 (${ma50_curr:.2f}).")
+
+    stop_loss_price = waiting_target * sl_multiplier
+    allowed_loss_usd = investment_amount * (risk_percent / 100)
+    risk_per_share = current_price - stop_loss_price
+    if risk_per_share <= 0:
+        risk_per_share = current_price * 0.05
+        stop_loss_price = current_price * 0.95
+
+    total_shares_to_buy = int((allowed_loss_usd / risk_per_share) * exposure_factor)
+    if (total_shares_to_buy * current_price) > investment_amount:
+        total_shares_to_buy = int(investment_amount / current_price)
+
+    shares_p1 = int(total_shares_to_buy * 0.60)
+    shares_p2 = total_shares_to_buy - shares_p1
+
+    return {
+        "df": df, "info": info, "verdict": verdict, "verdict_type": verdict_type,
+        "current_price": current_price, "current_rsi": current_rsi, "waiting_target": waiting_target,
+        "stop_loss_price": stop_loss_price, "allowed_loss_usd": allowed_loss_usd,
+        "total_shares_to_buy": total_shares_to_buy, "shares_p1": shares_p1,
+        "shares_p2": shares_p2, "cost_p1": shares_p1 * current_price,
+        "cost_p2": shares_p2 * waiting_target, "exposure_warning": exposure_warning,
+        "analysis_reasons": analysis_reasons, "candle_pattern": candle_pattern_detected
+    }
+# =========================================================
+# 📺 חלק 3: ממשק המשתמש והצגת הנתונים (Streamlit UI)
+# =========================================================
+user_portfolio = parse_portfolio(portfolio_input)
+portfolio_val = 0.0
+holdings_distribution = {}
+
+if user_portfolio:
+    with st.spinner('מחשב את ערך תיק ההשקעות הקיים שלך...'):
+        portfolio_val, holdings_distribution = calculate_portfolio_value(user_portfolio)
+    st.info(f"💼 שווי תיק המניות הנוכחי שלך בענן: **${portfolio_val:,.2f}**")
+
+if not ticker_1:
+    st.warning("אנא הזן סימול מניה בשדה החובה בסרגל הצדי.")
+else:
+    with st.spinner('מנתח נתוני שוק בשרת...'):
+        df1, info1 = load_stock_data(ticker_1, start_date, end_date)
+        df2, info2 = load_stock_data(ticker_2, start_date, end_date) if ticker_2 else (pd.DataFrame(), {})
+
+    if df1.empty or len(df1) < 200:
+        st.error(f"שגיאה: סימול המניה {ticker_1} אינו תקין או שאין מספיק נתונים היסטוריים.")
+    else:
+        val_held_1 = holdings_distribution.get(ticker_1, 0.0)
+        res1 = analyze_ticker(df1, info1, investment_amount, risk_percent, ticker_1, portfolio_val, val_held_1, risk_profile)
         
-        # חישוב מחיר ומגמה טכנית (ממוצע נע 200)
-        current_price = float(hist['Close'].iloc[-1])
-        ma200 = float(hist['Close'].mean())
-        trend = "מגמה חיובית 📈" if current_price > ma200 else "מגמה שלילית 📉"
+        has_second_stock = not df2.empty and len(df2) >= 200
+        if has_second_stock:
+            val_held_2 = holdings_distribution.get(ticker_2, 0.0)
+            res2 = analyze_ticker(df2, info2, investment_amount, risk_percent, ticker_2, portfolio_val, val_held_2, risk_profile)
+
+        # --- א. טבלת השוואה מהירה ---
+        if has_second_stock:
+            st.subheader("📋 לוח סריקה והשוואה מהירה")
+            summary_table = {
+                "פרמטר": ["שם החברה", "מחיר נוכחי", "תבנית נר", "המלצה טכנית", "יעד כניסה/תמיכה"],
+                ticker_1: [res1['info'].get('longName', ticker_1), f"${res1['current_price']:.2f}", res1['candle_pattern'], res1['verdict'], f"${res1['waiting_target']:.2f}"],
+                ticker_2: [res2['info'].get('longName', ticker_2), f"${res2['current_price']:.2f}", res2['candle_pattern'], res2['verdict'], f"${res2['waiting_target']:.2f}"]
+            }
+            st.table(pd.DataFrame(summary_table).set_index("פרמטר"))
+        else:
+            st.subheader(f"📊 דוח ניתוח ממוקד: {res1['info'].get('longName', ticker_1)} ({ticker_1})")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("מחיר נוכחי", f"${res1['current_price']:.2f}")
+            c2.metric("מדד RSI", f"{res1['current_rsi']:.1f}")
+            c3.metric("תבנית נר שזוהתה", res1['candle_pattern'])
+            c4.metric("סטטוס מערכת", res1['verdict'])
+
+        if res1['exposure_warning']:
+            st.warning(f"⚠️ **שים לב חשיפת יתר!** מניית {ticker_1} תופסת נתח משמעותי מתיק ההשקעות שלך.")
+
+        # --- ב. סיכום תהליך הניתוח ---
+        st.write("### 📝 סיכום תהליך הניתוח והממצאים הטכניים")
+        st.write(f"הדוח מותאם אישית עבור פרופיל משקיע: **{risk_profile}**.")
+        for reason in res1['analysis_reasons']: st.write(f"🔹 {reason}")
+        if has_second_stock:
+            st.write(f"**עבור מניית {ticker_2}:**")
+            for reason in res2['analysis_reasons']: st.write(f"🔹 {reason}")
+
+        # --- ג. תצוגת מחשבון ניהול הסיכונים ---
+        st.markdown("---")
+        st.subheader("🧮 מחשבון ניהול סיכונים והנחיות פעולה לתקציב")
         
-        # חישוב מדדי סיכון
-        daily_returns = hist['Close'].pct_change().dropna()
-        historical_volatility = float(daily_returns.std() * np.sqrt(252)) * 100 # סטיית תקן שנתית
-        six_month_return = float((current_price - hist['Close'].iloc[0]) / hist['Close'].iloc[0]) * 100
+        def show_ui_metrics(res, ticker_name):
+            col1, col2, col3 = st.columns(3)
+            if res['verdict_type'] == "WAIT":
+                col1.metric("סך מניות לקנייה מיידית", "0 יחידות")
+                col2.metric("תקציב מנוצל כרגע", "$0.00")
+                col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res['stop_loss_price']:.2f}")
+                st.error(f"🛑 **אסטרטגיית פעולה ל-{ticker_name} (להמתין לירידה):**")
+                st.markdown(f"* **אין לבצע קנייה במחיר השוק הנוכחי (${res['current_price']:.2f}).**\n* **פקודת לימיט עתידית:** מומלץ למקם פקודת רכש עבור **{res['total_shares_to_buy']}** יחידות ברמת התמיכה/בולינגר תחתון ב-**${res['waiting_target']:.2f}**.")
+            elif res['verdict_type'] == "HOLD":
+                col1.metric("סך מניות מומלץ", f"{res['shares_p1']} יחידות")
+                col2.metric("תקציב מנוצל ראשוני", f"${res['cost_p1']:,.2f}")
+                col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res['stop_loss_price']:.2f}")
+                st.warning(f"🟡 **אסטרטגיית פעולה ל-{ticker_name} (מצב ניטרלי/דשדוש):**")
+                st.markdown(f"* **שלב א':** קנה רק **{res['shares_p1']}** יחידות במחיר הנוכחי (**${res['current_price']:.2f}**).\n* **שלב ב':** שים פקודת לימיט ל-**{res['shares_p2']}** יחידות בקו התמיכה (**${res['waiting_target']:.2f}**).")
+            else: # BUY
+                col1.metric("סך מניות מומלץ לקנייה", f"{res['total_shares_to_buy']} יחידות")
+                col2.metric("תקציב מנוצל בפועל", f"${(res['cost_p1'] + res['cost_p2']):,.2f}")
+                col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res['stop_loss_price']:.2f}")
+                st.success(f"🟢 **אסטרטגיית פעולה ל-{ticker_name} (אות קנייה):**")
+                st.markdown(f"* **שלב א' (כניסה מיידית):** קנה **{res['shares_p1']}** מניות במחיר נוכחי (**${res['current_price']:.2f}**).\n* **שלב ב' (חיזוק בתמיכה):** הצב פקודת לימיט ל-**{res['shares_p2']}** מניות בשער **${res['waiting_target']:.2f}**.")
+
+        if has_second_stock:
+            t1, t2 = st.tabs([f"💰 תוכנית מסחר {ticker_1}", f"💰 תוכנית מסחר {ticker_2}"])
+            with t1: show_ui_metrics(res1, ticker_1)
+            with t2: show_ui_metrics(res2, ticker_2)
+        else:
+            show_ui_metrics(res1, ticker_1)
+
+        # --- ד. גרפים טכניים בתחתית הדף ---
+        st.markdown("---")
+        st.subheader("📉 גרפים טכניים ומעקב מגמות")
         
-        # שליפת נתוני פונדמנטלס מורחבים - שימוש ב-None במקום מחרוזת "N/A" למניעת שגיאות חישוב
-        info = getattr(stock, 'info', {})
-        target_mean = info.get('targetMeanPrice', None)
-        recommendation = info.get('recommendationKey', None)
-        high_52w = info.get('fiftyTwoWeekHigh', current_price)
-        sector = info.get('sector', 'Unknown Sector')
-        pe = info.get('trailingPE', None)
-        forward_pe = info.get('forwardPE', None)
-        
-        div_yield = info.get('dividendYield', 0.0)
-        if div_yield: 
-            div_yield = div_yield * 100 # המרה לאחוזים
+        def plot_graph(res):
+            df = res['df']
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
+            # הוספת נרות
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']), row=1, col=1)
+            # הוספת רצועות בולינגר לגרף העליון
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(173,216,230,0.4)', width=1, dash='dash'), name="בולינגר עליון"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(173,216,230,0.4)', width=1, dash='dash'), name="בולינגר תחתון"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Middle'], line=dict(color='cyan', width=1), name="בולינגר אמצע"), row=1, col=1)
             
-        gross_margins = info.get('grossMargins', 0.0)
-        if gross_margins: 
-            gross_margins = gross_margins * 100 # המרה לאחוזים
-            
-        market_cap = info.get('marketCap', 0)
-        beta = info.get('beta', 1.0)
-        
-        # מרחק מהשיא השנתי
-        pct_from_high = ((high_52w - current_price) / high_52w) * 100 if high_52w else 0.0
-        
-        # שליפת חדשות אחרונות
-        news_list = []
-        try:
-            raw_news = stock.news
-            if raw_news:
-                for item in raw_news[:4]:
-                    content = item.get("content", item)
-                    title = content.get("title", "No Title")
-                    news_list.append(title)
-        except: 
-            pass
-            
-        light_news = news_list if news_list else ["No news available"]
-        news_summary = " | ".join(news_list) if news_list else "No recent news found."
-        
-        return {
-            "price": current_price, "sector": sector, "beta": beta, "pe": pe, "forward_pe": forward_pe,
-            "dividend_yield": div_yield, "gross_margins": gross_margins, "market_cap": market_cap, 
-            "trend": trend, "target_price": target_mean, "analyst_rating": recommendation, 
-            "news": news_summary, "light_news": light_news, "high_52w": high_52w, "pct_from_high": pct_from_high,
-            "volatility": historical_volatility, "six_month_return": six_month_return, "hist_df": hist
-        }
-    except: 
-        return None
-# --- מסך הגדרת התיק הקיים ---
-if st.session_state.page == "setup":
-    st.title("🎯 מסך פתיחה: הגדרת התיק הקיים")
-    
-    if os.path.exists(CSV_FILE): 
-        st.info("📂 נתוני התיק שלך נטענו אוטומטית מהשמירה האחרונה במחשב.")
-        
-    portfolio_cash = st.number_input("יתרת מזומן נוכחית בתיק ($):", min_value=0, value=2000)
-    
-    st.subheader("➕ הוספת מניה לתיק")
-    col_t, col_s = st.columns(2)
-    new_ticker = col_t.text_input("סימול מניה (למשל AAPL):", "").upper().strip()
-    new_shares = col_s.number_input("כמות מניות:", min_value=1, value=1)
-    
-    if st.button("הוסף מניה לתיק"):
-        if new_ticker:
-            with st.spinner(f"בודק את הסימול {new_ticker}..."):
-                data = fetch_stock_advanced_engine(new_ticker)
-                if data:
-                    exists = False
-                    for item in st.session_state.portfolio:
-                        if item['ticker'] == new_ticker:
-                            item['shares'] += new_shares
-                            exists = True
-                            break
-                    if not exists:
-                        st.session_state.portfolio.append({
-                            "ticker": new_ticker, "shares": new_shares, "price": data["price"], 
-                            "sector": data["sector"], "beta": data["beta"], "pe": data["pe"] if data["pe"] else 0,
-                            "market_cap": data["market_cap"], "trend": data["trend"]
-                        })
-                    save_portfolio_to_file()
-                    st.success(f" המניה {new_ticker} נוספה בהצלחה לתיק ונשמרה!")
-                    st.rerun()
-                else:
-                    st.error("❌ הסימול לא נמצא ב-Yahoo Finance או שיש בעיית תקשורת זמנית.")
-                    
-    # חישובים וסיכום התיק הנוכחי
-    total_portfolio_value = portfolio_cash
-    rows = []
-    for item in st.session_state.portfolio:
-        current_value = item["shares"] * item["price"]
-        total_portfolio_value += current_value
-        rows.append({
-            "נכס": item["ticker"], "כמות": item["shares"], 
-            "מחיר נוכחי": f"${item['price']:.2f}", "שווי פוזיציה ($)": current_value, 
-            "סקטור": item["sector"], "בטא": item["beta"]
-        })
-        
-    if rows or portfolio_cash > 0:
-        st.write("---")
-        st.subheader("📊 סיכום ומדדי התיק הנוכחי")
-        c1, c2 = st.columns(2)
-        
-        c1.metric(label="שווי תיק כולל (מזומן + מניות)", value=f"${total_portfolio_value:,.2f}")
-        
-        total_stock_val = sum(r["שווי פוזיציה ($)"] for r in rows)
-        # תיקון באג: בטא משוקללת של תיק ריק ממניות (רק מזומן) צריכה להיות 0.0
-        weighted_beta = 0.0
-        if total_stock_val > 0:
-            weighted_beta = sum(r["בטא"] * r["שווי פוזיציה ($)"] for r in rows) / total_stock_val
-            
-        c2.metric(label="מדד תנודתיות תיק משוקלל (Beta)", value=f"{weighted_beta:.2f}")
-        
-        if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
-            
-        col_b1, col_b2 = st.columns(2)
-        if col_b1.button("🗑️ איפוס ומחיקת התיק לצמיתות", type="secondary"):
-            st.session_state.portfolio = []
-            save_portfolio_to_file()
-            st.rerun()
-        if col_b2.button("🚀 המשך למסך ניתוח והשקעות חדשות", type="primary"):
-            st.session_state.total_portfolio_value = total_portfolio_value
-            st.session_state.portfolio_cash = portfolio_cash
-            st.session_state.page = "analysis"
-            st.rerun()
-# --- מסך ניתוח: בחינת פוטנציאל השקעה ---
-elif st.session_state.page == "analysis":
-    st.title("🔍 מסך ניתוח: בחינת פוטנציאל השקעה")
-    
-    if st.button("⬅️ חזור לעריכת התיק"):
-        st.session_state.page = "setup"
-        st.rerun()
-        
-    st.info(f"**שווי התיק המחושב שלך:** ${st.session_state.total_portfolio_value:,.2f} | **הון חדש פנוי להשקעה:** ${additional_capital:,.2f}")
-    
-    mode = st.radio("בחר את אופן בחינת ההשקעה החדשה:", [
-        "בחינת מניה בודדת כפוטנציאל השקעה",
-        "השוואה בין מספר מניות כפוטנציאל השקעה"
-    ])
-    
-    portfolio_desc = ""
-    current_chart_data = [{"נכס": "Cash", "שווי ($)": st.session_state.portfolio_cash}]
-    for k in st.session_state.portfolio:
-        val = k['shares'] * k['price']
-        portfolio_desc += f"- מחזיק מניית {k['ticker']}: בשווי ${val:.2f} (סקטור: {k['sector']}, בטא: {k['beta']})\n"
-        current_chart_data.append({"נכס": k['ticker'], "שווי ($)": val})
-    portfolio_desc += f"- מזומן פנוי בתיק: ${st.session_state.portfolio_cash:.2f}\n"
-    
-    if mode == "בחינת מניה בודדת כפוטנציאל השקעה":
-        target_ticker = st.text_input("הזן סימול מניה לבחינה (למשל NVDA):", "NVDA").upper().strip()
-        if st.button("📊 נתח מניה והצג סימולציה", type="primary"):
-            if not api_key:
-                st.warning("⚠️ אנא הזן מפתח API בתפריט הצדדי")
-            elif target_ticker:
-                with st.spinner(f"שולף נתונים ומריץ סימולציה עבור {target_ticker}..."):
-                    data = fetch_stock_advanced_engine(target_ticker)
-                    if data:
-                        existing_val = sum(item["shares"] * item["price"] for item in st.session_state.portfolio if item["ticker"] == target_ticker)
-                        current_concen = (existing_val / st.session_state.total_portfolio_value) * 100 if st.session_state.total_portfolio_value > 0 else 0
-                        
-                        potential_new_val = existing_val + additional_capital
-                        new_total_value = st.session_state.total_portfolio_value + additional_capital
-                        potential_concen = (potential_new_val / new_total_value) * 100
-                        
-                        # סימולציית "מה אם" ויזואלית
-                        st.subheader("📈 סימולציית פילוח נכסים: מצב נוכחי מול עתידי")
-                        future_chart_data = []
-                        found_future = False
-                        for item in current_chart_data:
-                            if item["נכס"] == target_ticker:
-                                future_chart_data.append({"נכס": item["נכס"], "שווי ($)": item["שווי ($)"] + additional_capital})
-                                found_future = True
-                            else:
-                                future_chart_data.append(item.copy())
-                        if not found_future:
-                            future_chart_data.append({"נכס": target_ticker, "שווי ($)": additional_capital})
-                            
-                        col_fig1, col_fig2 = st.columns(2)
-                        fig_curr = px.pie(pd.DataFrame(current_chart_data), values="שווי ($)", names="נכס", title="מבנה התיק הנוכחי", hole=0.4)
-                        fig_fut = px.pie(pd.DataFrame(future_chart_data), values="שווי ($)", names="נכס", title=f"מבנה התיק לאחר רכישת {target_ticker}", hole=0.4)
-                        col_fig1.plotly_chart(fig_curr, use_container_width=True)
-                        col_fig2.plotly_chart(fig_fut, use_container_width=True)
-                        
-                        # הוספת גרף ביצועים היסטורי אינטראקטיבי
-                        st.subheader(f"📉 היסטוריית מחיר מניית {target_ticker} (200 ימים אחרונים)")
-                        fig_hist = px.line(data["hist_df"].reset_index(), x="Date", y="Close", title=f"מגמת מחיר סגירה עבור {target_ticker}")
-                        st.plotly_chart(fig_hist, use_container_width=True)
-                        # טבלת שינוי חשיפה ריכוזית
-                        st.subheader("🏢 שינוי ריכוזיות וחשיפה בתיק")
-                        overview_data = [
-                            {"מדד": "שווי פוזיציה במניה ($)", "מצב נוכחי (לפני)": f"${existing_val:,.2f}", "מצב עתידי (אחרי)": f"${potential_new_val:,.2f}"},
-                            {"מדד": "אחוז ריכוזיות מהתיק", "מצב נוכחי (לפני)": f"{current_concen:.1f}%", "מצב עתידי (אחרי)": f"{potential_concen:.1f}%"}
-                        ]
-                        st.dataframe(pd.DataFrame(overview_data), use_container_width=True)
-                        
-                        # נתוני שוק טקטיים ומדדי סיכון משודרגים
-                        st.subheader("🎲 נתוני שוק ומדדי סיכון מתקדמים")
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("קונזנזוס אנליסטים", str(data['analyst_rating']).upper() if data['analyst_rating'] else "N/A")
-                        col2.metric("ממוצע מחיר יעד", f"${data['target_price']:.2f}" if data['target_price'] else "N/A")
-                        col3.metric("תנודתיות היסטורית (סטיית תקן)", f"{data['volatility']:.1f}%")
-                        col4.metric("תשואה חצי-שנתית", f"{data['six_month_return']:.1f}%")
-                        
-                        st.session_state.last_context = {
-                            "ticker": target_ticker, "data": data, "current_concen": current_concen, 
-                            "potential_concen": potential_concen, "portfolio_desc": portfolio_desc, 
-                            "report_lang": report_lang, "risk_profile": risk_profile
-                        }
-                    else:
-                        st.error("❌ לא ניתן היה לשלוף נתוני שוק עבור סימול זה.")
-                        
-        if "last_context" in st.session_state and st.session_state.last_context["ticker"] == target_ticker:
-            ctx = st.session_state.last_context
-            lang_instruction = "Respond ONLY in Hebrew." if ctx["report_lang"] == "עברית (Hebrew)" else "Respond ONLY in English. Do not use Hebrew letters at all."
-            st.write("---")
-            
-            st.subheader("🤖 AI Sentiment (ניתוח סנטימנט חדשות מהיר)")
-            if st.button("נתח סנטימנט חדשות"):
-                with st.spinner("...מנתח את כותרות החדשות האחרונות"):
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        sentiment_prompt = f"Analyze the sentiment of the following headlines for {ctx['ticker']} and give a brief summary, rating (Positive/Negative/Neutral) and trend direction: {ctx['data']['news']}. {lang_instruction}"
-                        sent_response = client.models.generate_content(model='gemini-2.0-pro-exp-02-05', contents=sentiment_prompt)
-                        st.info(sent_response.text)
-                    except Exception as e:
-                        st.error(f"שגיאה בניתוח הסנטימנט: {str(e)}")
-            if st.button("✨ הפק דוח השקעות מורחב ומלא של ה-AI", type="primary"):
-                with st.spinner("מנוע ה-AI מפיק דוח עומק מפורט..."):
-                    user_context = f"""
-                    [מצב תיק קיים] שווי כולל: ${st.session_state.total_portfolio_value:.2f}
-                    פירוט נכסים: {ctx['portfolio_desc']}
-                    [העסקה המבוקשת] להשקיע ${additional_capital:.2f} במניית {ctx['ticker']}.
-                    נתוני שוק: סקטור {ctx['data']['sector']}, בטא {ctx['data']['beta']:.2f}, מכפיל נוכחי {ctx['data']['pe'] if ctx['data']['pe'] else 'N/A'}, מכפיל עתידי {ctx['data']['forward_pe'] if ctx['data']['forward_pe'] else 'N/A'}, תשואת דיבידנד {ctx['data']['dividend_yield']:.2f}%, שולי רווח גולמי {ctx['data']['gross_margins']:.1f}%.
-                    שנתית תנודתיות: {ctx['data']['volatility']:.1f}%. אנליסטים קונזנזוס: {ctx['data']['analyst_rating']}, מחיר יעד ${ctx['data']['target_price'] if ctx['data']['target_price'] else 'N/A'}.
-                    חשיפה נוכחית: {ctx['current_concen']:.1f}%, חשיפה סופית פוטנציאלית: {ctx['potential_concen']:.1f}%.
-                    """
-                    
-                    system_instruction_full = f"""
-                    אתה אנליסט פיננסי בכיר. המשתמש פועל תחת פרופיל סיכון {ctx['risk_profile']}.
-                    בצע בדיקה מעמיקה: ניתוח התאמה לתיק והערכת המניה ותזמון טקטי (לקנות/לחכות/לא לקנות).
-                    Provide a FULL, comprehensive investment report with mathematical justification. {lang_instruction}
-                    """
-                    
-                    response_text = None
-                    try:
-                        client = genai.Client(api_key=api_key)
-                        for attempt in range(3):
-                            try:
-                                response_full = client.models.generate_content(
-                                    model='gemini-2.0-pro-exp-02-05', 
-                                    contents=user_context, 
-                                    config=types.GenerateContentConfig(system_instruction=system_instruction_full, temperature=0.2)
-                                )
-                                response_text = response_full.text
-                                break
-                            except Exception as e:
-                                if "429" in str(e) and attempt < 2:
-                                    sleep_time = (attempt + 1) * 5
-                                    time.sleep(sleep_time)
-                                else:
-                                    st.error(f"שגיאה בהפקת הדוח: {str(e)}")
-                                    break
-                    except Exception as client_err:
-                        st.error(f"שגיאה באתחול לקוח ה-AI: {str(client_err)}")
-                        
-                    if response_text:
-                        st.subheader("📋 דוח אנליטי מלא ומורחב מה-AI")
-                        st.markdown(response_text)
-                        
-                        st.download_button(
-                            label="📥 הורד את דוח ה-AI המלא כקובץ TXT",
-                            data=response_text,
-                            file_name=f"AI_Investment_Report_{target_ticker}.txt",
-                            mime="text/plain"
-                        )
-    # --- מודול השוואה משודרג ומורחב בין מספר נכסים ---
-    elif mode == "השוואה בין מספר מניות כפוטנציאל השקעה":
-        st.subheader("⚖️ השוואה מורחבת בין מספר נכסים פוטנציאליים")
-        tickers_list_raw = st.text_input("הזן סימולים להשוואה (מופרדים בפסיק):", "NVDA, AMD")
-        
-        if st.button("בצע השוואה והפק המלצה", type="primary"):
-            if not api_key:
-                st.warning("⚠️ אנא הזן מפתח API בתפריט הצדדי")
-            else:
-                tickers = [t.strip().upper() for t in tickers_list_raw.split(",") if t.strip()]
-                comparison_data = []
-                
-                with st.spinner("שולף נתוני אמת פונדמנטליים מורחבים..."):
-                    for t in tickers:
-                        d = fetch_stock_advanced_engine(t)
-                        if d:
-                            existing_val = sum(item["shares"] * item["price"] for item in st.session_state.portfolio if item["ticker"] == t)
-                            current_concen = (existing_val / st.session_state.total_portfolio_value) * 100 if st.session_state.total_portfolio_value > 0 else 0
-                            
-                            # תיקון באג: הוספת additional_capital גם למכנה לקבלת ריכוזיות מדויקת מהתיק העתידי
-                            new_total_portfolio_value = st.session_state.total_portfolio_value + additional_capital
-                            potential_concen = ((existing_val + additional_capital) / new_total_portfolio_value) * 100 if new_total_portfolio_value > 0 else 0
-                            
-                            comparison_data.append({
-                                "מניה": t, "מחיר": f"${d['price']:.2f}", "סקטור": d["sector"], "בטא": d["beta"], 
-                                "P/E נוכחי": f"{d['pe']:.1f}" if d['pe'] else 'N/A', 
-                                "P/E עתידי": f"{d['forward_pe']:.1f}" if d['forward_pe'] else 'N/A', 
-                                "תשואת דיבידנד": f"{d['dividend_yield']:.2f}%",
-                                "שולי רווח גולמי": f"{d['gross_margins']:.1f}%", "תנודתיות": f"{d['volatility']:.1f}%",
-                                "חשיפה לפני": f"{current_concen:.1f}%", "חשיפה אחרי": f"{potential_concen:.1f}%"
-                            })
-                            
-                if comparison_data:
-                    st.write("### 📊 טבלת ריכוז והשוואה מורחבת (כולל פונדמנטלס)")
-                    st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
-                else:
-                    st.error("❌ לאמצאו נתוני שוק עבור הסימולים שהוזנו.")
+            fig.add_trace(go.Scatter(x=df.index, y=df['MA200'], line=dict(color='red', width=1.2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1.2)), row=2, col=1)
+            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=350, showlegend=False, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+        if has_second_stock:
+            cg1, cg2 = st.columns(2)
+            with cg1: plot_graph(res1)
+            with cg2: plot_graph(res2)
+        else:
+            plot_graph(res1)
+
+        st.markdown("---")
+        st.caption("**⚠️ אזהרת סיכון והבהרה משפטית:** הנתונים והניתוחים המוצגים באפליקציה זו נועדו למטרות לימודיות בלבד. שוק ההון אינו צפוי לחלוטין ועלול להיות שגוי. כל פעולה היא על אחריותך הבלעדית.")
